@@ -13,4 +13,13 @@ cp Info.plist "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP"
 
 echo "Built: $(pwd)/$APP"
-echo "Run:   open \"$(pwd)/$APP\""
+
+# ./build.sh install → put it in /Applications and (re)launch it there.
+if [[ "${1:-}" == "install" ]]; then
+  pkill -f "Server Gauge.app/Contents/MacOS/ServerGauge" 2>/dev/null || true
+  ditto "$APP" "/Applications/$APP"
+  open "/Applications/$APP"
+  echo "Installed + launched: /Applications/$APP"
+else
+  echo "Run:   open \"$(pwd)/$APP\"   (or ./build.sh install)"
+fi

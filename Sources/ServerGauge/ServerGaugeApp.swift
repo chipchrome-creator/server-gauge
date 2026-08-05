@@ -9,6 +9,7 @@
 
 import SwiftUI
 import AppKit
+import ServiceManagement
 
 @main
 struct ServerGaugeApp: App {
@@ -19,6 +20,17 @@ struct ServerGaugeApp: App {
                 print("\(s.project) | \(s.command) | \(ports) | \(Int(s.rssMB)) MB | \(s.cwd)")
             }
             exit(0)
+        }
+        if CommandLine.arguments.contains("--login-status") {
+            print("login item: \(SMAppService.mainApp.status == .enabled ? "enabled" : "not enabled")")
+            exit(0)
+        }
+        // First launch: register as a login item so the gauge survives
+        // reboots out of the box. The footer toggle controls it after that.
+        let d = UserDefaults.standard
+        if !d.bool(forKey: "loginItemConfigured") {
+            d.set(true, forKey: "loginItemConfigured")
+            try? SMAppService.mainApp.register()
         }
     }
 
@@ -34,6 +46,7 @@ struct ServerListView: View {
     @State private var servers: [ServerInfo] = []
     @State private var lastScan: Date? = nil
     @State private var scanning = false
+    @State private var startAtLogin = SMAppService.mainApp.status == .enabled
 
     private let ticker = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
@@ -63,9 +76,18 @@ struct ServerListView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(s.project).fontWeight(.semibold)
-                            Text(s.ports.map { ":\($0)" }.joined(separator: "  "))
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.teal)
+                            ForEach(s.ports, id: \.self) { port in
+                                Button {
+                                    NSWorkspace.shared.open(URL(string: "http://localhost:\(port)")!)
+                                } label: {
+                                    Text(":\(port)")
+                                        .font(.system(.caption, design: .monospaced))
+                                        .underline()
+                                        .foregroundStyle(.teal)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Open http://localhost:\(port)")
+                            }
                         }
                         Text("\(s.command) · \(fmtMB(s.rssMB)) · pid \(s.id)")
                             .font(.caption)
@@ -93,12 +115,18 @@ struct ServerListView: View {
 
             Divider()
             HStack {
+                Toggle("Start at login", isOn: $startAtLogin)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .onChange(of: startAtLogin) { on in
+                        if on { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
+                    }
+                Spacer()
                 if let t = lastScan {
                     Text("Updated \(t.formatted(date: .omitted, time: .standard))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .font(.caption)
             }
