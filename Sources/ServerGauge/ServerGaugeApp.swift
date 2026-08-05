@@ -34,21 +34,73 @@ struct ServerGaugeApp: App {
         }
     }
 
+    @StateObject private var model = ServerModel()
+
     var body: some Scene {
-        MenuBarExtra("Server Gauge", systemImage: "server.rack") {
-            ServerListView()
+        MenuBarExtra {
+            ServerListView(model: model)
+        } label: {
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
     }
 }
 
+/** Icon + live count of running project servers. The scan runs on the
+ *  model's own timer, so the badge stays fresh with the popover closed. */
+struct MenuBarLabel: View {
+    @ObservedObject var model: ServerModel
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "server.rack")
+            if !model.servers.isEmpty {
+                Text("\(model.servers.count)")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+        }
+    }
+}
+
+/** Shared scan state — one background timer feeds both the badge and the
+ *  open panel. */
+final class ServerModel: ObservableObject {
+    @Published var servers: [ServerInfo] = []
+    @Published var lastScan: Date? = nil
+    private var scanning = false
+    private var timer: Timer?
+
+    init() {
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    func refresh() {
+        guard !scanning else { return }
+        scanning = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = scanServers()
+            DispatchQueue.main.async {
+                self?.servers = found
+                self?.lastScan = Date()
+                self?.scanning = false
+            }
+        }
+    }
+
+    func stop(_ s: ServerInfo) {
+        if killpg(s.pgid, SIGTERM) != 0 { kill(s.id, SIGTERM) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refresh() }
+    }
+}
+
 struct ServerListView: View {
-    @State private var servers: [ServerInfo] = []
-    @State private var lastScan: Date? = nil
-    @State private var scanning = false
+    @ObservedObject var model: ServerModel
     @State private var startAtLogin = SMAppService.mainApp.status == .enabled
 
-    private let ticker = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+    private var servers: [ServerInfo] { model.servers }
+    private var lastScan: Date? { model.lastScan }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -65,7 +117,7 @@ struct ServerListView: View {
             }
 
             if servers.isEmpty {
-                Text(scanning && lastScan == nil ? "Scanning…" : "No project servers are listening.")
+                Text(lastScan == nil ? "Scanning…" : "No project servers are listening.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 6)
@@ -133,32 +185,14 @@ struct ServerListView: View {
         }
         .padding(14)
         .frame(width: 360)
-        .onAppear { refresh() }
-        .onReceive(ticker) { _ in refresh() }
+        .onAppear { model.refresh() }
     }
 
     private func fmtMB(_ mb: Double) -> String {
         mb >= 1024 ? String(format: "%.1f GB", mb / 1024) : "\(Int(mb)) MB"
     }
 
-    private func refresh() {
-        guard !scanning else { return }
-        scanning = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let found = scanServers()
-            DispatchQueue.main.async {
-                servers = found
-                lastScan = Date()
-                scanning = false
-            }
-        }
-    }
+    private func refresh() { model.refresh() }
 
-    private func stop(_ s: ServerInfo) {
-        // Signal the whole process group — the npm wrapper and workers go
-        // down with the listener instead of orphaning. Falls back to the
-        // single pid if the group signal is refused.
-        if killpg(s.pgid, SIGTERM) != 0 { kill(s.id, SIGTERM) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { refresh() }
-    }
+    private func stop(_ s: ServerInfo) { model.stop(s) }
 }
