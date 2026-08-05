@@ -32,6 +32,20 @@ struct ServerInfo: Identifiable, Equatable {
     }
 }
 
+/** Activity-Monitor-style memory: phys_footprint counts private + compressed
+ *  pages, so an idle dev server whose heap macOS has compressed still shows
+ *  its true size (RSS would report a misleading 32 MB for a 2 GB server).
+ *  Works without privileges for same-user processes. */
+func footprintMB(_ pid: Int32) -> Double? {
+    var usage = rusage_info_current()
+    let result = withUnsafeMutablePointer(to: &usage) {
+        $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+            proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+        }
+    }
+    return result == 0 ? Double(usage.ri_phys_footprint) / 1_048_576 : nil
+}
+
 @discardableResult
 func runTool(_ path: String, _ args: [String]) -> String {
     let p = Process()
@@ -69,16 +83,16 @@ func scanServers() -> [ServerInfo] {
         }
     }
 
-    // One process-table snapshot: pid → (pgid, rssKB), so each server can
-    // report its whole tree's memory (npm wrapper + workers, not just the
-    // 12MB process that happens to hold the socket).
+    // One process-table snapshot: pid → pgid, then per-group memory as the
+    // sum of each member's phys_footprint (RSS fallback), so a server row
+    // reports its whole tree's true size — wrapper + workers + compressed.
     var pgidOf: [Int32: Int32] = [:]
-    var rssByPgid: [Int32: Double] = [:]
+    var memByPgid: [Int32: Double] = [:]
     for line in runTool("/bin/ps", ["-axo", "pid=,pgid=,rss="]).split(separator: "\n") {
         let cols = line.split(separator: " ", omittingEmptySubsequences: true)
         guard cols.count >= 3, let p = Int32(cols[0]), let g = Int32(cols[1]), let r = Double(cols[2]) else { continue }
         pgidOf[p] = g
-        rssByPgid[g, default: 0] += r
+        memByPgid[g, default: 0] += footprintMB(p) ?? (r / 1024)
     }
 
     let home = NSHomeDirectory()
@@ -98,7 +112,6 @@ func scanServers() -> [ServerInfo] {
         else { continue }
 
         let pgid = pgidOf[pid] ?? pid
-        let rssKB = rssByPgid[pgid] ?? 0
         let full = runTool("/bin/ps", ["-o", "command=", "-p", String(pid)])
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -108,7 +121,7 @@ func scanServers() -> [ServerInfo] {
             command: info.command,
             ports: info.ports.sorted(),
             cwd: cwd,
-            rssMB: rssKB / 1024,
+            rssMB: memByPgid[pgid] ?? 0,
             fullCommand: full
         ))
     }
