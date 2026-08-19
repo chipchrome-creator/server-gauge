@@ -18,18 +18,22 @@ struct ServerInfo: Identifiable, Equatable {
 
     /** Display name: the folder, walking up past generic monorepo layers
      *  ("packages", "apps", "src"…) so eddy/packages reads as "eddy". */
-    var project: String {
-        let generic: Set<String> = ["packages", "apps", "app", "src", "services", "server", "backend", "frontend", "web"]
-        var path = cwd as NSString
-        var name = path.lastPathComponent
-        let home = NSHomeDirectory()
-        while generic.contains(name.lowercased()), (path.deletingLastPathComponent as String).hasPrefix(home),
-              (path.deletingLastPathComponent as String) != home {
-            path = path.deletingLastPathComponent as NSString
-            name = path.lastPathComponent
-        }
-        return name
+    var project: String { projectName(from: cwd) }
+}
+
+/** Project display name for a working directory — shared by the server list
+ *  and Claude Code alert notifications. */
+func projectName(from cwd: String) -> String {
+    let generic: Set<String> = ["packages", "apps", "app", "src", "services", "server", "backend", "frontend", "web"]
+    var path = cwd as NSString
+    var name = path.lastPathComponent
+    let home = NSHomeDirectory()
+    while generic.contains(name.lowercased()), (path.deletingLastPathComponent as String).hasPrefix(home),
+          (path.deletingLastPathComponent as String) != home {
+        path = path.deletingLastPathComponent as NSString
+        name = path.lastPathComponent
     }
+    return name
 }
 
 /** Activity-Monitor-style memory: phys_footprint counts private + compressed

@@ -9,10 +9,17 @@
 
 import SwiftUI
 import AppKit
+import Combine
 import ServiceManagement
 
 @main
 struct ServerGaugeApp: App {
+    // The status item is managed directly in AppKit: SwiftUI's MenuBarExtra
+    // renders its label once and never refreshes it (verified — the panel
+    // updated while the icon stayed frozen), so the bell/checkmark badges
+    // could never appear. NSStatusItem redraws whenever we tell it to.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+
     init() {
         if CommandLine.arguments.contains("--scan") {
             for s in scanServers() {
@@ -34,30 +41,151 @@ struct ServerGaugeApp: App {
         }
     }
 
-    @StateObject private var model = ServerModel()
-
     var body: some Scene {
-        MenuBarExtra {
-            ServerListView(model: model)
-        } label: {
-            MenuBarLabel(model: model)
-        }
-        .menuBarExtraStyle(.window)
+        Settings { EmptyView() } // no windows — the status item is the app
     }
 }
 
-/** Icon + live count of running project servers. The scan runs on the
- *  model's own timer, so the badge stays fresh with the popover closed. */
-struct MenuBarLabel: View {
-    @ObservedObject var model: ServerModel
-    var body: some View {
-        HStack(spacing: 2) {
-            Image(systemName: "server.rack")
-            if !model.servers.isEmpty {
-                Text("\(model.servers.count)")
-                    .font(.system(size: 11, weight: .semibold))
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let model = ServerModel()
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+    private var subs = Set<AnyCancellable>()
+    private var pulseTimer: Timer?
+    private var pulseOn = true
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        ClaudeAlerts.shared.start()
+
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePopover)
+
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: ServerListView(model: model))
+
+        // objectWillChange fires before the mutation lands, so hop to the
+        // next runloop turn to draw the post-change state.
+        for change in [model.objectWillChange.eraseToAnyPublisher(),
+                       ClaudeAlerts.shared.objectWillChange.eraseToAnyPublisher()] {
+            change
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in DispatchQueue.main.async { self?.renderStatusItem() } }
+                .store(in: &subs)
+        }
+        renderStatusItem()
+    }
+
+    @objc private func togglePopover() {
+        guard let button = statusItem.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    /** Starts/stops the attention pulse (input alerts only) and redraws. */
+    private func renderStatusItem() {
+        if ClaudeAlerts.shared.inputCount > 0 {
+            if pulseTimer == nil {
+                pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+                    guard let self else { return }
+                    self.pulseOn.toggle()
+                    self.drawStatusImage()
+                }
+            }
+        } else {
+            pulseTimer?.invalidate()
+            pulseTimer = nil
+            pulseOn = true
+        }
+        drawStatusImage()
+    }
+
+    /** Redraws the menu bar icon: server rack + running count, then an
+     *  orange pulsing bell (+count) while Claude sessions wait on input, or
+     *  a green checkmark for unseen "done"s. With no alerts it's a plain
+     *  template image so macOS tints it with the menu bar; with alerts it's
+     *  drawn in explicit colors matched to the menu bar's appearance. */
+    private func drawStatusImage() {
+        enum Piece {
+            case icon(NSImage, alpha: CGFloat)
+            case text(String, NSColor)
+        }
+        let alerts = ClaudeAlerts.shared
+        let colored = alerts.inputCount > 0 || alerts.doneCount > 0
+        let isDark = statusItem.button?.effectiveAppearance
+            .bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        // Template images only use alpha, so black works for both paths.
+        let mono: NSColor = colored ? (isDark ? .white : .black) : .black
+
+        var pieces: [Piece] = []
+        if let rack = symbol("server.rack", size: 13) {
+            pieces.append(.icon(colored ? tinted(rack, mono) : rack, alpha: 1))
+        }
+        if !model.servers.isEmpty { pieces.append(.text("\(model.servers.count)", mono)) }
+        if alerts.inputCount > 0 {
+            let alpha: CGFloat = pulseOn ? 1 : 0.35
+            if let bell = symbol("bell.badge.fill", size: 12) {
+                pieces.append(.icon(tinted(bell, .systemOrange), alpha: alpha))
+            }
+            if alerts.inputCount > 1 { pieces.append(.text("\(alerts.inputCount)", .systemOrange)) }
+        } else if alerts.doneCount > 0 {
+            if let check = symbol("checkmark.circle.fill", size: 12) {
+                pieces.append(.icon(tinted(check, .systemGreen), alpha: 1))
             }
         }
+
+        func attrs(_ color: NSColor) -> [NSAttributedString.Key: Any] {
+            [.font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: color]
+        }
+        let height: CGFloat = 18
+        let spacing: CGFloat = 3
+        var width: CGFloat = -spacing
+        for p in pieces {
+            switch p {
+            case let .icon(i, _): width += i.size.width + spacing
+            case let .text(s, c): width += (s as NSString).size(withAttributes: attrs(c)).width + spacing
+            }
+        }
+
+        let image = NSImage(size: NSSize(width: max(width, 1), height: height))
+        image.lockFocus()
+        var x: CGFloat = 0
+        for p in pieces {
+            switch p {
+            case let .icon(i, alpha):
+                i.draw(
+                    in: NSRect(x: x, y: (height - i.size.height) / 2, width: i.size.width, height: i.size.height),
+                    from: .zero, operation: .sourceOver, fraction: alpha
+                )
+                x += i.size.width + spacing
+            case let .text(s, c):
+                let sz = (s as NSString).size(withAttributes: attrs(c))
+                (s as NSString).draw(at: NSPoint(x: x, y: (height - sz.height) / 2), withAttributes: attrs(c))
+                x += sz.width + spacing
+            }
+        }
+        image.unlockFocus()
+        image.isTemplate = !colored
+        statusItem.button?.image = image
+    }
+
+    private func symbol(_ name: String, size: CGFloat) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: .regular))
+    }
+
+    private func tinted(_ image: NSImage, _ color: NSColor) -> NSImage {
+        let img = NSImage(size: image.size)
+        img.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: image.size))
+        color.set()
+        NSRect(origin: .zero, size: image.size).fill(using: .sourceAtop)
+        img.unlockFocus()
+        return img
     }
 }
 
@@ -97,6 +225,7 @@ final class ServerModel: ObservableObject {
 
 struct ServerListView: View {
     @ObservedObject var model: ServerModel
+    @ObservedObject var alerts = ClaudeAlerts.shared
     @State private var startAtLogin = SMAppService.mainApp.status == .enabled
 
     private var servers: [ServerInfo] { model.servers }
@@ -165,6 +294,41 @@ struct ServerListView: View {
                 .padding(.vertical, 2)
             }
 
+            if !alerts.pending.isEmpty {
+                Divider()
+                Text("Claude Code").font(.headline)
+                ForEach(alerts.pending) { e in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: e.kind == .input ? "bell.badge.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(e.kind == .input ? Color.orange : Color.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(e.kind == .input ? "\(e.project) needs your input" : "\(e.project) is done")
+                                .fontWeight(.semibold)
+                            if !e.message.isEmpty {
+                                Text(e.message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Text(e.date, style: .relative)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer(minLength: 4)
+                        Button {
+                            alerts.dismiss(e)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                                .imageScale(.large)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss")
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
             Divider()
             HStack {
                 Toggle("Start at login", isOn: $startAtLogin)
@@ -186,6 +350,9 @@ struct ServerListView: View {
         .padding(14)
         .frame(width: 360)
         .onAppear { model.refresh() }
+        // "Done" items have been seen once the panel closes — clear them so
+        // the checkmark badge doesn't linger.
+        .onDisappear { alerts.clearDone() }
     }
 
     private func fmtMB(_ mb: Double) -> String {

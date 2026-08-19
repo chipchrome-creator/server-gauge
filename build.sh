@@ -7,9 +7,10 @@ swift build -c release
 
 APP="Server Gauge.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/ServerGauge "$APP/Contents/MacOS/ServerGauge"
 cp Info.plist "$APP/Contents/Info.plist"
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$APP"
 
 echo "Built: $(pwd)/$APP"
@@ -17,7 +18,9 @@ echo "Built: $(pwd)/$APP"
 # ./build.sh install → put it in /Applications and (re)launch it there.
 if [[ "${1:-}" == "install" ]]; then
   pkill -f "Server Gauge.app/Contents/MacOS/ServerGauge" 2>/dev/null || true
+  sleep 1 # let the old instance fully exit before replacing + relaunching
   ditto "$APP" "/Applications/$APP"
+  sleep 1
   open "/Applications/$APP"
   echo "Installed + launched: /Applications/$APP"
 else
