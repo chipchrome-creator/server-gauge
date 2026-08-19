@@ -19,6 +19,9 @@ echo "Built: $(pwd)/$APP"
 if [[ "${1:-}" == "install" ]]; then
   pkill -f "Server Gauge.app/Contents/MacOS/ServerGauge" 2>/dev/null || true
   sleep 1 # let the old instance fully exit before replacing + relaunching
+  # Remove first: ditto merges into an existing bundle, which can leave
+  # stale files from older versions and break the code signature.
+  rm -rf "/Applications/$APP"
   ditto "$APP" "/Applications/$APP"
   sleep 1
   open "/Applications/$APP"

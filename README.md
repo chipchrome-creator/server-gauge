@@ -13,7 +13,7 @@ with a stop button per server.
 - Memory is summed across the server's process group — the real footprint,
   not the 12 MB wrapper holding the socket. Listeners in the same tree
   (monorepo web + api) merge into one row with both ports.
-- ✕ sends SIGTERM to the whole process group. Refreshes every 5 s while open.
+- ✕ sends SIGTERM to the whole process group. Rescans every 10 s.
 
 ## Claude Code alerts
 Server Gauge also posts a macOS notification when a Claude Code session

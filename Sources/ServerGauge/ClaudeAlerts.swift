@@ -18,9 +18,15 @@ struct ClaudeEvent: Identifiable, Equatable {
     let id = UUID()
     let kind: Kind
     let cwd: String
+    let session: String
     let project: String
     let message: String
     let date: Date
+
+    /** Pending items are one-per-session so a second session in the same
+     *  project can't clear or mask the first one's alert. Old events
+     *  without a session id fall back to the directory. */
+    var key: String { session.isEmpty ? cwd : session }
 }
 
 final class ClaudeAlerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
@@ -46,10 +52,8 @@ final class ClaudeAlerts: NSObject, ObservableObject, UNUserNotificationCenterDe
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
-        // Events queued while the gauge wasn't running are stale — clear
-        // them silently rather than replaying a burst of old banners.
-        drain(notify: false)
-
+        // Watch first, then clear the backlog: the reverse order can lose an
+        // event that lands between the drain and the watcher install.
         let fd = open(dir, O_EVTONLY)
         guard fd >= 0 else { return }
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
@@ -58,42 +62,63 @@ final class ClaudeAlerts: NSObject, ObservableObject, UNUserNotificationCenterDe
         src.resume()
         source = src
 
-        pruneTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.prune() }
+        // Events queued while the gauge wasn't running are stale — clear
+        // them silently rather than replaying a burst of old banners.
+        drain(notify: false)
+
+        // Reconciliation: vnode notifications can coalesce or drop, so
+        // re-scan periodically (and prune expired "done" items).
+        pruneTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.drain(notify: true)
+            self?.prune()
+        }
     }
 
-    /** Consume every completed event file in the folder. Hooks write to a
-     *  .tmp name and mv to .json, so a .json file is always whole; .tmp
-     *  files still being written are left alone. */
+    /** Consume every completed event file in the folder, oldest write
+     *  first so causally ordered events (input → ack) apply in order.
+     *  Hooks write to a .tmp name and mv to .json, so a .json file is
+     *  always whole; .tmp files still being written are left alone. */
     private func drain(notify: Bool) {
         let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
-        for name in names where name.hasSuffix(".json") {
-            let path = (dir as NSString).appendingPathComponent(name)
-            defer { try? fm.removeItem(atPath: path) }
+        let dirURL = URL(fileURLWithPath: dir)
+        guard let urls = try? fm.contentsOfDirectory(
+            at: dirURL, includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+        func mtime(_ u: URL) -> Date {
+            (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        for url in urls.filter({ $0.pathExtension == "json" }).sorted(by: { mtime($0) < mtime($1) }) {
+            defer { try? fm.removeItem(at: url) }
             guard notify,
-                  let data = fm.contents(atPath: path),
+                  let data = try? Data(contentsOf: url),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             else { continue }
             handle(
                 event: obj["event"] as? String ?? "",
                 cwd: obj["cwd"] as? String ?? "",
+                session: obj["session"] as? String ?? "",
                 message: obj["message"] as? String ?? ""
             )
         }
     }
 
-    private func handle(event: String, cwd: String, message: String) {
+    private func handle(event: String, cwd: String, session: String, message: String) {
         let project = cwd.isEmpty ? "Claude Code" : projectName(from: cwd)
+        let key = session.isEmpty ? cwd : session
         // Latest event per session replaces whatever came before it — a
         // stop supersedes its input request, an ack (user answered) clears.
-        pending.removeAll { $0.cwd == cwd }
+        pending.removeAll { $0.key == key }
         switch event {
         case "input":
-            pending.append(ClaudeEvent(kind: .input, cwd: cwd, project: project, message: message, date: Date()))
+            pending.append(ClaudeEvent(
+                kind: .input, cwd: cwd, session: session, project: project, message: message, date: Date()
+            ))
             post(title: "\(project) — Claude needs your input",
                  body: message.isEmpty ? "A session is waiting on you." : message)
         case "stop":
-            pending.append(ClaudeEvent(kind: .done, cwd: cwd, project: project, message: message, date: Date()))
+            pending.append(ClaudeEvent(
+                kind: .done, cwd: cwd, session: session, project: project, message: message, date: Date()
+            ))
             post(title: "\(project) — Claude is done",
                  body: "The session finished and is ready for you.")
         default:
@@ -122,7 +147,7 @@ final class ClaudeAlerts: NSObject, ObservableObject, UNUserNotificationCenterDe
      *  what state the running app actually holds. */
     private func writeStateFile() {
         let items = pending.map {
-            ["kind": $0.kind == .input ? "input" : "done", "project": $0.project, "cwd": $0.cwd]
+            ["kind": $0.kind == .input ? "input" : "done", "project": $0.project, "cwd": $0.cwd, "session": $0.session]
         }
         if let data = try? JSONSerialization.data(withJSONObject: ["pending": items]) {
             try? data.write(to: URL(fileURLWithPath: (NSHomeDirectory() as NSString)

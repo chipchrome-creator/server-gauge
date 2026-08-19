@@ -112,7 +112,7 @@ func scanServers() -> [ServerInfo] {
         guard
             let cwdLine = cwdOut.split(separator: "\n").first(where: { $0.hasPrefix("n") }),
             case let cwd = String(cwdLine.dropFirst()),
-            cwd.hasPrefix(home), cwd != home, !cwd.hasPrefix(library)
+            cwd.hasPrefix(home + "/"), !cwd.hasPrefix(library + "/"), cwd != library
         else { continue }
 
         let pgid = pgidOf[pid] ?? pid
