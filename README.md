@@ -35,6 +35,20 @@ Notifications → Server Gauge).
 `make-icon.swift` regenerates `AppIcon.icns` (run `swift make-icon.swift`
 if the design changes); build.sh copies it into the bundle.
 
+## Install (team quick start)
+1. Grab `ServerGauge-x.y.z.zip` from the latest GitHub release, unzip, and
+   drag `Server Gauge.app` to /Applications. Apple Silicon, macOS 13+.
+2. First launch: macOS blocks unnotarized apps — System Settings →
+   Privacy & Security → **Open Anyway** (one time only).
+3. For the Claude Code alerts, run once:
+   ```bash
+   ./install-hooks.sh
+   ```
+   It merges the three hooks into `~/.claude/settings.json` (backs it up
+   first, preserves everything already there, safe to re-run). Requires
+   `jq` (included in macOS 15+, otherwise `brew install jq`). Restart any
+   open Claude Code sessions afterwards.
+
 ## Build & run
 ```bash
 ./build.sh
