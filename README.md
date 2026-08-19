@@ -26,9 +26,9 @@ posts the notification, and deletes the file.
 The menu bar mirrors the state: an orange bell that pulses (with a count)
 while any session waits on input, a green checkmark for finished sessions
 you haven't looked at yet. The panel lists each pending item with a dismiss button. State
-clears itself — answering a session (UserPromptSubmit) clears its bell,
-opening then closing the panel clears checkmarks, and unseen "done"s
-expire after 30 minutes. Events queued while the app isn't running are
+clears itself — answering a session (UserPromptSubmit) clears its bell;
+checkmarks clear when you switch back to the Claude desktop app or open
+then close the panel, and expire after 30 minutes regardless. Events queued while the app isn't running are
 discarded on launch. Requires notification permission (System Settings →
 Notifications → Server Gauge).
 

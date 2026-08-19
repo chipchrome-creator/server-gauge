@@ -72,6 +72,16 @@ final class ClaudeAlerts: NSObject, ObservableObject, UNUserNotificationCenterDe
             self?.drain(notify: true)
             self?.prune()
         }
+
+        // Switching back to the Claude desktop app counts as seeing the
+        // finished sessions — clear the "done" checkmarks (bells stay).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let bundle = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
+                .bundleIdentifier ?? ""
+            if bundle.hasPrefix("com.anthropic.") { self?.clearDone() }
+        }
     }
 
     /** Consume every completed event file in the folder, oldest write
